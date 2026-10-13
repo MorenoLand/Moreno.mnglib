@@ -4,6 +4,8 @@ OPTION CASEMAP:NONE
 
 PUBLIC mng_is_mng
 mng_is_mng PROC
+    test rcx, rcx
+    jz mng_is_not_mng
     cmp rdx, 8
     jb mng_is_not_mng
     mov rax, QWORD PTR [rcx]
@@ -19,7 +21,8 @@ mng_is_mng ENDP
 
 PUBLIC mng_frame_count
 mng_frame_count PROC
-    push r12
+    test rcx, rcx
+    jz mng_frame_invalid
     cmp rdx, 8
     jb mng_frame_invalid
     mov r8, rcx
@@ -30,7 +33,7 @@ mng_frame_count PROC
     jne mng_frame_invalid
     mov r10, 8
     xor r11d, r11d
-    xor r12d, r12d
+    xor ecx, ecx
 mng_frame_next_chunk:
     cmp r10, r9
     jae mng_frame_complete
@@ -55,33 +58,37 @@ mng_frame_next_chunk:
     sub rax, r10
     cmp rdx, rax
     ja mng_frame_invalid
+    cmp DWORD PTR [r8+r10+4], 5244484Dh
+    jne mng_frame_not_mhdr
+    cmp rdx, 40
+    jb mng_frame_invalid
+    jmp mng_frame_advance
+mng_frame_not_mhdr:
     cmp DWORD PTR [r8+r10+4], 52444849h
     jne mng_frame_not_ihdr
-    test r12d, r12d
+    test ecx, ecx
     jnz mng_frame_advance
-    mov r12d, 1
+    mov ecx, 1
     jmp mng_frame_advance
 mng_frame_not_ihdr:
     cmp DWORD PTR [r8+r10+4], 444E4549h
     jne mng_frame_advance
-    test r12d, r12d
+    test ecx, ecx
     jz mng_frame_advance
     inc r11
-    xor r12d, r12d
+    xor ecx, ecx
 mng_frame_advance:
     add r10, rdx
     jmp mng_frame_next_chunk
 mng_frame_complete:
-    test r12d, r12d
+    test ecx, ecx
     jnz mng_frame_invalid
     test r11, r11
     jz mng_frame_invalid
     mov rax, r11
-    pop r12
     ret
 mng_frame_invalid:
     xor eax, eax
-    pop r12
     ret
 mng_frame_count ENDP
 

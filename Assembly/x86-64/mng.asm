@@ -5,6 +5,8 @@ section .text
 
 global mng_is_mng
 mng_is_mng:
+    test rcx, rcx
+    jz .not_mng
     cmp rdx, 8
     jb .not_mng
     mov rax, [rcx]
@@ -19,7 +21,8 @@ mng_is_mng:
 
 global mng_frame_count
 mng_frame_count:
-    push r12
+    test rcx, rcx
+    jz .invalid
     cmp rdx, 8
     jb .invalid
     mov r8, rcx
@@ -30,7 +33,7 @@ mng_frame_count:
     jne .invalid
     mov r10, 8
     xor r11d, r11d
-    xor r12d, r12d
+    xor ecx, ecx
 .next_chunk:
     cmp r10, r9
     jae .complete
@@ -55,31 +58,35 @@ mng_frame_count:
     sub rax, r10
     cmp rdx, rax
     ja .invalid
+    cmp dword [r8 + r10 + 4], 0x5244484D
+    jne .not_mhdr
+    cmp rdx, 40
+    jb .invalid
+    jmp .advance
+.not_mhdr:
     cmp dword [r8 + r10 + 4], 0x52444849
     jne .not_ihdr
-    test r12d, r12d
+    test ecx, ecx
     jnz .advance
-    mov r12d, 1
+    mov ecx, 1
     jmp .advance
 .not_ihdr:
     cmp dword [r8 + r10 + 4], 0x444E4549
     jne .advance
-    test r12d, r12d
+    test ecx, ecx
     jz .advance
     inc r11
-    xor r12d, r12d
+    xor ecx, ecx
 .advance:
     add r10, rdx
     jmp .next_chunk
 .complete:
-    test r12d, r12d
+    test ecx, ecx
     jnz .invalid
     test r11, r11
     jz .invalid
     mov rax, r11
-    pop r12
     ret
 .invalid:
     xor eax, eax
-    pop r12
     ret
