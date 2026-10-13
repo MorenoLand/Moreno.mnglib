@@ -1,8 +1,8 @@
 class_name MNG
 extends RefCounted
 
-const MNG_SIGNATURE = PackedByteArray([0x8a, 0x4d, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
-const PNG_SIGNATURE = PackedByteArray([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+const MNG_SIGNATURE: PackedByteArray = [0x8a, 0x4d, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]
+const PNG_SIGNATURE: PackedByteArray = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]
 
 class MNGFrame:
     var png: PackedByteArray
@@ -52,8 +52,8 @@ static func parse(data: PackedByteArray):
         return null
     var animation = MNGAnimation.new()
     var frame := PackedByteArray()
-    var pending_delay := 0
-    var has_pending_delay := false
+    var default_ticks := -1
+    var next_ticks := -1
     var in_png := false
     var offset := MNG_SIGNATURE.size()
     while offset < data.size():
@@ -64,23 +64,25 @@ static func parse(data: PackedByteArray):
         if chunk_length < 12 or chunk_length > data.size() - offset:
             return null
         var chunk_type := data.slice(offset + 4, offset + 8).get_string_from_ascii()
-        var chunk_data := data.slice(offset + 8, offset + 8 + data_length)
         if chunk_type == "MHDR":
             if data_length < 28:
                 return null
-            animation.width = _read_u32(chunk_data, 0)
-            animation.height = _read_u32(chunk_data, 4)
-            var ticks := _read_u32(chunk_data, 8)
+            animation.width = _read_u32(data, offset + 8)
+            animation.height = _read_u32(data, offset + 12)
+            var ticks := _read_u32(data, offset + 16)
             if ticks > 0:
                 animation.ticks_per_second = ticks
-            animation.nominal_layer_count = _read_u32(chunk_data, 12)
-            animation.nominal_frame_count = _read_u32(chunk_data, 16)
-            animation.nominal_play_time = _read_u32(chunk_data, 20)
-            animation.simplicity_profile = _read_u32(chunk_data, 24)
+            animation.nominal_layer_count = _read_u32(data, offset + 20)
+            animation.nominal_frame_count = _read_u32(data, offset + 24)
+            animation.nominal_play_time = _read_u32(data, offset + 28)
+            animation.simplicity_profile = _read_u32(data, offset + 32)
         elif chunk_type == "FRAM":
-            var frame_delay = _parse_frame_delay(chunk_data)
-            has_pending_delay = frame_delay[0]
-            pending_delay = frame_delay[1]
+            var frame_delay := _parse_frame_delay(data, offset + 8, data_length)
+            if frame_delay[0] == 1:
+                next_ticks = frame_delay[1]
+            elif frame_delay[0] == 2:
+                default_ticks = frame_delay[1]
+                next_ticks = -1
         if not in_png and chunk_type == "IHDR":
             frame = PackedByteArray()
             frame.append_array(PNG_SIGNATURE)
@@ -89,12 +91,12 @@ static func parse(data: PackedByteArray):
             frame.append_array(data.slice(offset, offset + chunk_length))
             if chunk_type == "IEND":
                 var delay := 100
-                if has_pending_delay:
-                    delay = maxi(0, roundi(float(pending_delay) * 1000.0 / float(animation.ticks_per_second)))
-                animation.frames.append(MNGFrame.new(frame.duplicate(), delay))
+                var frame_ticks := default_ticks if next_ticks < 0 else next_ticks
+                if frame_ticks >= 0:
+                    delay = _delay_milliseconds(frame_ticks, animation.ticks_per_second)
+                animation.frames.append(MNGFrame.new(frame, delay))
                 frame = PackedByteArray()
-                has_pending_delay = false
-                pending_delay = 0
+                next_ticks = -1
                 in_png = false
         offset += chunk_length
     if in_png or animation.frames.is_empty():
@@ -119,24 +121,28 @@ static func decode_frames(animation) -> Array:
     return textures
 
 static func _read_u32(data: PackedByteArray, offset: int) -> int:
-    return data.decode_u32(offset)
+    return (data[offset] << 24) | (data[offset + 1] << 16) | (data[offset + 2] << 8) | data[offset + 3]
 
-static func _parse_frame_delay(data: PackedByteArray) -> Array:
-    if data.is_empty():
-        return [false, 0]
+@warning_ignore("integer_division")
+static func _delay_milliseconds(ticks: int, ticks_per_second: int) -> int:
+    return mini(4294967295, (ticks * 1000 + ticks_per_second / 2) / ticks_per_second)
+
+static func _parse_frame_delay(data: PackedByteArray, start: int, length: int) -> Array:
+    if length == 0:
+        return [0, 0]
     var offset := 1
-    while offset < data.size() and data[offset] != 0:
+    while offset < length and data[start + offset] != 0:
         offset += 1
-    if offset == data.size():
-        return [false, 0]
+    if offset == length:
+        return [0, 0]
     offset += 1
-    if offset >= data.size():
-        return [false, 0]
-    var has_delay := data[offset] != 0
+    if offset >= length:
+        return [0, 0]
+    var mode := data[start + offset]
     offset += 1
-    if data.size() - offset < 3:
-        return [false, 0]
+    if length - offset < 3:
+        return [0, 0]
     offset += 3
-    if not has_delay or data.size() - offset < 4:
-        return [false, 0]
-    return [true, _read_u32(data, offset)]
+    if mode == 0 or length - offset < 4:
+        return [0, 0]
+    return [mode, _read_u32(data, start + offset)]
