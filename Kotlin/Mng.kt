@@ -3,7 +3,11 @@ package mng
 import java.io.ByteArrayOutputStream
 import java.time.Duration
 
-data class MngFrame(val png: ByteArray, val delayMilliseconds: Long)
+data class MngFrame(val png: ByteArray, val delayMilliseconds: Long) {
+    override fun equals(other: Any?): Boolean = other is MngFrame && png.contentEquals(other.png) && delayMilliseconds == other.delayMilliseconds
+
+    override fun hashCode(): Int = 31 * png.contentHashCode() + delayMilliseconds.hashCode()
+}
 
 class MngAnimation(
     val width: Long,
@@ -18,9 +22,10 @@ class MngAnimation(
     fun frameIndexAt(elapsed: Duration): Int {
         if (frames.isEmpty()) return -1
         if (frames.size == 1) return 0
-        val duration = frames.sumOf { it.delayMilliseconds }
+        val duration = frames.fold(0L) { sum, frame -> if (sum > Long.MAX_VALUE - frame.delayMilliseconds) Long.MAX_VALUE else sum + frame.delayMilliseconds }
         if (duration <= 0) return 0
-        var milliseconds = elapsed.toMillis() % duration
+        val seconds = elapsed.seconds
+        var milliseconds = (if (seconds > Long.MAX_VALUE / 1000) Long.MAX_VALUE else if (seconds < Long.MIN_VALUE / 1000) Long.MIN_VALUE else elapsed.toMillis()) % duration
         if (milliseconds < 0) milliseconds += duration
         for ((index, frame) in frames.withIndex()) {
             if (milliseconds < frame.delayMilliseconds) return index
@@ -50,16 +55,17 @@ object Mng {
         var simplicityProfile = 0L
         val frames = mutableListOf<MngFrame>()
         val frame = ByteArrayOutputStream()
-        var pendingDelay: Long? = null
+        var defaultTicks: Long? = null
+        var nextTicks: Long? = null
         var inPng = false
         var offset = mngSignature.size
         while (offset < data.size) {
             if (data.size - offset < 12) throw MngException("truncated MNG chunk")
-            val dataLength = data.readU32(offset).toInt()
+            val declaredLength = data.readU32(offset)
+            if (declaredLength > data.size - offset - 12) throw MngException("invalid MNG chunk length")
+            val dataLength = declaredLength.toInt()
             val chunkLength = dataLength + 12
-            if (chunkLength < 12 || chunkLength > data.size - offset) throw MngException("invalid MNG chunk length")
             val type = data.copyOfRange(offset + 4, offset + 8).toString(Charsets.US_ASCII)
-            val chunkData = data.copyOfRange(offset + 8, offset + 8 + dataLength)
             if (type == "MHDR") {
                 if (dataLength < 28) throw MngException("invalid MNG header")
                 width = data.readU32(offset + 8)
@@ -71,7 +77,13 @@ object Mng {
                 nominalPlayTime = data.readU32(offset + 28)
                 simplicityProfile = data.readU32(offset + 32)
             } else if (type == "FRAM") {
-                pendingDelay = parseFrameDelay(chunkData)
+                val change = parseFrameDelay(data.copyOfRange(offset + 8, offset + 8 + dataLength))
+                if (change != null && change.first == 1) {
+                    nextTicks = change.second
+                } else if (change != null && change.first == 2) {
+                    defaultTicks = change.second
+                    nextTicks = null
+                }
             }
             if (!inPng && type == "IHDR") {
                 frame.write(pngSignature)
@@ -80,10 +92,10 @@ object Mng {
             if (inPng) {
                 frame.write(data, offset, chunkLength)
                 if (type == "IEND") {
-                    val delay = pendingDelay?.let { Math.max(0L, Math.round(it * 1000.0 / ticksPerSecond)) } ?: 100L
+                    val delay = (nextTicks ?: defaultTicks)?.let { Math.min(0xffffffffL, (it * 1000 + ticksPerSecond / 2) / ticksPerSecond) } ?: 100L
                     frames += MngFrame(frame.toByteArray(), delay)
                     frame.reset()
-                    pendingDelay = null
+                    nextTicks = null
                     inPng = false
                 }
             }
@@ -93,21 +105,22 @@ object Mng {
         return MngAnimation(width, height, ticksPerSecond, nominalLayerCount, nominalFrameCount, nominalPlayTime, simplicityProfile, frames)
     }
 
+    @Throws(MngException::class)
     fun firstPngFrame(data: ByteArray): ByteArray = parse(data).frames.first().png.copyOf()
 
-    private fun parseFrameDelay(data: ByteArray): Long? {
+    private fun parseFrameDelay(data: ByteArray): Pair<Int, Long>? {
         if (data.isEmpty()) return null
         var offset = 1
         while (offset < data.size && data[offset].toInt() != 0) offset++
         if (offset == data.size) return null
         offset++
         if (offset >= data.size) return null
-        val hasDelay = data[offset].toInt() != 0
+        val change = data[offset].toInt() and 0xff
         offset++
         if (data.size - offset < 3) return null
         offset += 3
-        if (!hasDelay || data.size - offset < 4) return null
-        return data.readU32(offset)
+        if (change == 0 || data.size - offset < 4) return null
+        return Pair(change, data.readU32(offset))
     }
 
     private fun ByteArray.readU32(offset: Int): Long = ((this[offset].toLong() and 0xff) shl 24) or ((this[offset + 1].toLong() and 0xff) shl 16) or ((this[offset + 2].toLong() and 0xff) shl 8) or (this[offset + 3].toLong() and 0xff)
