@@ -44,9 +44,10 @@ public final class Mng {
             if (frames.isEmpty()) return -1;
             if (frames.size() == 1) return 0;
             long duration = 0;
-            for (Frame frame : frames) duration += frame.delayMilliseconds;
+            for (Frame frame : frames) duration = duration > Long.MAX_VALUE - frame.delayMilliseconds ? Long.MAX_VALUE : duration + frame.delayMilliseconds;
             if (duration <= 0) return 0;
-            long milliseconds = elapsed.toMillis() % duration;
+            long seconds = elapsed.getSeconds();
+            long milliseconds = (seconds > Long.MAX_VALUE / 1000 ? Long.MAX_VALUE : seconds < Long.MIN_VALUE / 1000 ? Long.MIN_VALUE : elapsed.toMillis()) % duration;
             if (milliseconds < 0) milliseconds += duration;
             for (int index = 0; index < frames.size(); index++) {
                 if (milliseconds < frames.get(index).delayMilliseconds) return index;
@@ -82,7 +83,8 @@ public final class Mng {
         long simplicityProfile = 0;
         List<Frame> frames = new ArrayList<>();
         ByteArray frame = new ByteArray();
-        Long pendingDelay = null;
+        Long defaultTicks = null;
+        Long nextTicks = null;
         boolean inPng = false;
         int offset = MNG_SIGNATURE.length;
         while (offset < data.length) {
@@ -102,7 +104,13 @@ public final class Mng {
                 nominalPlayTime = readU32(data, offset + 28);
                 simplicityProfile = readU32(data, offset + 32);
             } else if (type.equals("FRAM")) {
-                pendingDelay = parseFrameDelay(data, offset + 8, (int) dataLength);
+                long[] change = parseFrameDelay(data, offset + 8, (int) dataLength);
+                if (change != null && change[0] == 1) {
+                    nextTicks = change[1];
+                } else if (change != null && change[0] == 2) {
+                    defaultTicks = change[1];
+                    nextTicks = null;
+                }
             }
             if (!inPng && type.equals("IHDR")) {
                 frame.write(PNG_SIGNATURE);
@@ -111,10 +119,11 @@ public final class Mng {
             if (inPng) {
                 frame.write(data, offset, (int) chunkLength);
                 if (type.equals("IEND")) {
-                    long delay = pendingDelay == null ? 100 : Math.max(0, Math.round((double) pendingDelay * 1000.0 / ticksPerSecond));
+                    Long ticks = nextTicks != null ? nextTicks : defaultTicks;
+                    long delay = ticks == null ? 100 : Math.min(0xffffffffL, (ticks * 1000 + ticksPerSecond / 2) / ticksPerSecond);
                     frames.add(new Frame(frame.toByteArray(), delay));
                     frame.clear();
-                    pendingDelay = null;
+                    nextTicks = null;
                     inPng = false;
                 }
             }
@@ -132,30 +141,30 @@ public final class Mng {
         return ((long) (data[offset] & 0xff) << 24) | ((long) (data[offset + 1] & 0xff) << 16) | ((long) (data[offset + 2] & 0xff) << 8) | (data[offset + 3] & 0xffL);
     }
 
-    private static Long parseFrameDelay(byte[] data, int offset, int length) {
+    private static long[] parseFrameDelay(byte[] data, int offset, int length) {
         if (length == 0) return null;
         int index = 1;
         while (index < length && data[offset + index] != 0) index++;
         if (index == length) return null;
         index++;
         if (index >= length) return null;
-        boolean hasDelay = data[offset + index++] != 0;
+        int change = data[offset + index++] & 0xff;
         if (length - index < 3) return null;
         index += 3;
-        if (!hasDelay || length - index < 4) return null;
-        return readU32(data, offset + index);
+        if (change == 0 || length - index < 4) return null;
+        return new long[] {change, readU32(data, offset + index)};
     }
 
     private static final class ByteArray {
         private byte[] data = new byte[64];
         private int size;
 
-        void write(byte[] source) {
+        void write(byte[] source) throws ParseException {
             write(source, 0, source.length);
         }
 
-        void write(byte[] source, int offset, int length) {
-            ensure(size + length);
+        void write(byte[] source, int offset, int length) throws ParseException {
+            ensure((long) size + length);
             System.arraycopy(source, offset, data, size, length);
             size += length;
         }
@@ -170,11 +179,12 @@ public final class Mng {
             size = 0;
         }
 
-        private void ensure(int required) {
+        private void ensure(long required) throws ParseException {
             if (required <= data.length) return;
-            int capacity = data.length;
+            if (required > Integer.MAX_VALUE - 8) throw new ParseException("MNG frame too large");
+            long capacity = data.length;
             while (capacity < required) capacity *= 2;
-            byte[] resized = new byte[capacity];
+            byte[] resized = new byte[(int) Math.min(capacity, Integer.MAX_VALUE - 8)];
             System.arraycopy(data, 0, resized, 0, size);
             data = resized;
         }
