@@ -1,8 +1,8 @@
 # Cross-language MNG implementations
 
-Small, language-specific implementations that keep Multiple-image Network Graphics (MNG) usable across browsers, C++, Go, and Godot.
+Small, language-specific implementations that keep Multiple-image Network Graphics (MNG) usable across languages, game engines, and browsers.
 
-Each implementation parses the MNG signature and chunk stream, reads MHDR metadata, extracts embedded PNG frames, and applies FRAM timing with the MNG default of 100 ticks per second when needed.
+Each implementation except Assembly parses the MNG signature and chunk stream, reads MHDR metadata, extracts embedded PNG frames, and applies FRAM timing, using 100 ticks per second when MHDR gives none and a 100 ms delay for frames without a FRAM delay.
 
 ## Implementations
 
@@ -10,7 +10,7 @@ Each implementation parses the MNG signature and chunk stream, reads MHDR metada
 - [C++](C%2B%2B/README.md) — C++17 parser and PNG frame extraction API.
 - [C#](CSharp/README.md) — .NET parser, frame extraction, and timing API.
 - [Godot](Godot/README.md) — versioned Godot 3.x and 4.x GDScript ports.
-- [Golang](Golang/README.md) — Go parser, frame extraction, timing, and Ebiten integration.
+- [Golang](Golang/README.md) — standalone Go package for parsing, frame extraction, and timing.
 - [Java](Java/README.md) — Java 8+ parser, frame extraction, and timing API.
 - [JavaScript](JavaScript/README.md) — dependency-free browser parser and canvas player.
 - [Kotlin](Kotlin/README.md) — JVM parser, frame extraction, and timing API.

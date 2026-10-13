@@ -1,6 +1,7 @@
 CSharp/bin/
 CSharp/obj/
 Rust/target/
+Rust/Cargo.lock
 Python/__pycache__/
 Java/**/*.class
 Kotlin/**/*.class
