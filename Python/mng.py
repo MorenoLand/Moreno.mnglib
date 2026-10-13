@@ -1,6 +1,6 @@
 from dataclasses import dataclass, field
 from datetime import timedelta
-from typing import List, Optional, Union
+from typing import List, Optional, Tuple, Union
 
 MNG_SIGNATURE = bytes((0x8A, 0x4D, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A))
 PNG_SIGNATURE = bytes((0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A))
@@ -29,7 +29,7 @@ class MNGAnimation:
             return -1
         if len(self.frames) == 1:
             return 0
-        milliseconds = int(elapsed.total_seconds() * 1000) if isinstance(elapsed, timedelta) else int(elapsed)
+        milliseconds = elapsed // timedelta(milliseconds=1) if isinstance(elapsed, timedelta) else int(elapsed)
         duration = sum(frame.delay_milliseconds for frame in self.frames)
         if duration <= 0:
             return 0
@@ -46,7 +46,7 @@ def is_mng(data: bytes) -> bool:
 def _read_u32(data: bytes, offset: int) -> int:
     return int.from_bytes(data[offset:offset + 4], "big")
 
-def _parse_frame_delay(data: bytes) -> Optional[int]:
+def _parse_frame_delay(data: bytes) -> Optional[Tuple[int, int]]:
     if not data:
         return None
     offset = 1
@@ -57,21 +57,22 @@ def _parse_frame_delay(data: bytes) -> Optional[int]:
     offset += 1
     if offset >= len(data):
         return None
-    has_delay = data[offset] != 0
+    mode = data[offset]
     offset += 1
     if len(data) - offset < 3:
         return None
     offset += 3
-    if not has_delay or len(data) - offset < 4:
+    if mode == 0 or len(data) - offset < 4:
         return None
-    return _read_u32(data, offset)
+    return mode, _read_u32(data, offset)
 
 def parse(data: bytes) -> MNGAnimation:
     if not is_mng(data):
         raise MNGError("not an MNG image")
     animation = MNGAnimation()
     frame = bytearray()
-    pending_delay: Optional[int] = None
+    default_ticks: Optional[int] = None
+    next_ticks: Optional[int] = None
     in_png = False
     offset = len(MNG_SIGNATURE)
     while offset < len(data):
@@ -96,17 +97,25 @@ def parse(data: bytes) -> MNGAnimation:
             animation.nominal_play_time = _read_u32(chunk_data, 20)
             animation.simplicity_profile = _read_u32(chunk_data, 24)
         elif chunk_type == b"FRAM":
-            pending_delay = _parse_frame_delay(chunk_data)
+            frame_delay = _parse_frame_delay(chunk_data)
+            if frame_delay is not None:
+                mode, frame_ticks = frame_delay
+                if mode == 1:
+                    next_ticks = frame_ticks
+                elif mode == 2:
+                    default_ticks = frame_ticks
+                    next_ticks = None
         if not in_png and chunk_type == b"IHDR":
             frame = bytearray(PNG_SIGNATURE)
             in_png = True
         if in_png:
             frame.extend(data[offset:offset + chunk_length])
             if chunk_type == b"IEND":
-                delay = 100 if pending_delay is None else round(pending_delay * 1000 / animation.ticks_per_second)
-                animation.frames.append(MNGFrame(bytes(frame), max(0, delay)))
+                frame_ticks = default_ticks if next_ticks is None else next_ticks
+                delay = 100 if frame_ticks is None else min(0xFFFFFFFF, (frame_ticks * 1000 + animation.ticks_per_second // 2) // animation.ticks_per_second)
+                animation.frames.append(MNGFrame(bytes(frame), delay))
                 frame.clear()
-                pending_delay = None
+                next_ticks = None
                 in_png = False
         offset += chunk_length
     if in_png or not animation.frames:
