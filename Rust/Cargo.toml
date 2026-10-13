@@ -2,6 +2,9 @@
 name = "mng"
 version = "0.1.0"
 edition = "2021"
+description = "Dependency-free MNG parser, PNG frame extractor, and elapsed-time frame selector"
+license = "0BSD"
+repository = "https://github.com/MorenoLand/Moreno.mnglib"
 
 [lib]
 path = "src/lib.rs"

@@ -49,12 +49,13 @@ impl Animation {
     pub fn frame_index_at(&self, elapsed: Duration) -> Option<usize> {
         if self.frames.is_empty() { return None; }
         if self.frames.len() == 1 { return Some(0); }
-        let duration: Duration = self.frames.iter().map(|frame| frame.delay).sum();
+        let duration = self.frames.iter().fold(Duration::ZERO, |total, frame| total.saturating_add(frame.delay));
         if duration.is_zero() { return Some(0); }
-        let mut elapsed = Duration::from_millis((elapsed.as_millis() % duration.as_millis()) as u64);
+        let mut elapsed = elapsed.as_nanos() % duration.as_nanos();
         for (index, frame) in self.frames.iter().enumerate() {
-            if elapsed < frame.delay { return Some(index); }
-            elapsed -= frame.delay;
+            let delay = frame.delay.as_nanos();
+            if elapsed < delay { return Some(index); }
+            elapsed -= delay;
         }
         Some(self.frames.len() - 1)
     }
@@ -68,33 +69,34 @@ fn read_u32(data: &[u8], offset: usize) -> u32 {
     u32::from_be_bytes(data[offset..offset + 4].try_into().unwrap())
 }
 
-fn parse_frame_delay(data: &[u8]) -> Option<u32> {
+fn parse_frame_delay(data: &[u8]) -> Option<(u8, u32)> {
     if data.is_empty() { return None; }
     let mut offset = 1;
     while offset < data.len() && data[offset] != 0 { offset += 1; }
     if offset == data.len() { return None; }
     offset += 1;
     if offset >= data.len() { return None; }
-    let has_delay = data[offset] != 0;
+    let change = data[offset];
     offset += 1;
     if data.len() - offset < 3 { return None; }
     offset += 3;
-    if !has_delay || data.len() - offset < 4 { return None; }
-    Some(read_u32(data, offset))
+    if change == 0 || data.len() - offset < 4 { return None; }
+    Some((change, read_u32(data, offset)))
 }
 
 pub fn parse_mng(data: &[u8]) -> Result<Animation, Error> {
     if !is_mng(data) { return Err(Error::NotMng); }
     let mut animation = Animation { width: 0, height: 0, ticks_per_second: 100, nominal_layer_count: 0, nominal_frame_count: 0, nominal_play_time: 0, simplicity_profile: 0, frames: Vec::new() };
     let mut frame = Vec::new();
-    let mut pending_delay = None;
+    let mut default_ticks = None;
+    let mut next_ticks = None;
     let mut in_png = false;
     let mut offset = MNG_SIGNATURE.len();
     while offset < data.len() {
         if data.len() - offset < 12 { return Err(Error::TruncatedChunk); }
         let data_length = read_u32(data, offset) as usize;
-        let chunk_length = data_length.checked_add(12).ok_or(Error::InvalidChunkLength)?;
-        if chunk_length < 12 || chunk_length > data.len() - offset { return Err(Error::InvalidChunkLength); }
+        if data_length > data.len() - offset - 12 { return Err(Error::InvalidChunkLength); }
+        let chunk_length = data_length + 12;
         let chunk_type = &data[offset + 4..offset + 8];
         let chunk_data = &data[offset + 8..offset + 8 + data_length];
         if chunk_type == b"MHDR" {
@@ -108,7 +110,14 @@ pub fn parse_mng(data: &[u8]) -> Result<Animation, Error> {
             animation.nominal_play_time = read_u32(chunk_data, 20);
             animation.simplicity_profile = read_u32(chunk_data, 24);
         } else if chunk_type == b"FRAM" {
-            pending_delay = parse_frame_delay(chunk_data);
+            match parse_frame_delay(chunk_data) {
+                Some((1, ticks)) => next_ticks = Some(ticks),
+                Some((2, ticks)) => {
+                    default_ticks = Some(ticks);
+                    next_ticks = None;
+                }
+                _ => {}
+            }
         }
         if !in_png && chunk_type == b"IHDR" {
             frame.extend_from_slice(&PNG_SIGNATURE);
@@ -117,9 +126,9 @@ pub fn parse_mng(data: &[u8]) -> Result<Animation, Error> {
         if in_png {
             frame.extend_from_slice(&data[offset..offset + chunk_length]);
             if chunk_type == b"IEND" {
-                let delay = pending_delay.map(|ticks| Duration::from_millis((ticks as u64 * 1000 + animation.ticks_per_second as u64 / 2) / animation.ticks_per_second as u64)).unwrap_or_else(|| Duration::from_millis(100));
+                let delay = next_ticks.or(default_ticks).map(|ticks| Duration::from_millis(((ticks as u64 * 1000 + animation.ticks_per_second as u64 / 2) / animation.ticks_per_second as u64).min(u32::MAX as u64))).unwrap_or_else(|| Duration::from_millis(100));
                 animation.frames.push(Frame { png: std::mem::take(&mut frame), delay });
-                pending_delay = None;
+                next_ticks = None;
                 in_png = false;
             }
         }
