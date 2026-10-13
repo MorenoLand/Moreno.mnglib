@@ -61,8 +61,10 @@ namespace Mng
             if (!IsMng(data)) throw new FormatException("not an MNG image");
             var animation = new MngAnimation();
             var frame = new List<byte>();
-            uint pendingDelay = 0;
-            bool hasPendingDelay = false;
+            uint defaultTicks = 0;
+            bool hasDefaultTicks = false;
+            uint nextTicks = 0;
+            bool hasNextTicks = false;
             bool inPng = false;
             int offset = MngSignature.Length;
             while (offset < data.Length)
@@ -85,7 +87,20 @@ namespace Mng
                     animation.NominalPlayTime = ReadU32(data, offset + 28);
                     animation.SimplicityProfile = ReadU32(data, offset + 32);
                 }
-                else if (type == "FRAM") hasPendingDelay = ParseFrameDelay(data, offset + 8, length, out pendingDelay);
+                else if (type == "FRAM" && ParseFrameDelay(data, offset + 8, length, out byte change, out uint ticks))
+                {
+                    if (change == 1)
+                    {
+                        nextTicks = ticks;
+                        hasNextTicks = true;
+                    }
+                    else if (change == 2)
+                    {
+                        defaultTicks = ticks;
+                        hasDefaultTicks = true;
+                        hasNextTicks = false;
+                    }
+                }
                 if (!inPng && type == "IHDR")
                 {
                     frame.AddRange(PngSignature);
@@ -97,15 +112,14 @@ namespace Mng
                     if (type == "IEND")
                     {
                         uint delay = 100;
-                        if (hasPendingDelay)
+                        if (hasNextTicks || hasDefaultTicks)
                         {
-                            ulong milliseconds = ((ulong)pendingDelay * 1000 + animation.TicksPerSecond / 2) / animation.TicksPerSecond;
+                            ulong milliseconds = ((ulong)(hasNextTicks ? nextTicks : defaultTicks) * 1000 + animation.TicksPerSecond / 2) / animation.TicksPerSecond;
                             delay = milliseconds > uint.MaxValue ? uint.MaxValue : (uint)milliseconds;
                         }
                         animation.Frames.Add(new MngFrame(frame.ToArray(), delay));
                         frame.Clear();
-                        pendingDelay = 0;
-                        hasPendingDelay = false;
+                        hasNextTicks = false;
                         inPng = false;
                     }
                 }
@@ -125,8 +139,9 @@ namespace Mng
             return ((uint)data[offset] << 24) | ((uint)data[offset + 1] << 16) | ((uint)data[offset + 2] << 8) | data[offset + 3];
         }
 
-        private static bool ParseFrameDelay(byte[] data, int offset, int length, out uint delay)
+        private static bool ParseFrameDelay(byte[] data, int offset, int length, out byte change, out uint delay)
         {
+            change = 0;
             delay = 0;
             if (length == 0) return false;
             int index = 1;
@@ -134,10 +149,10 @@ namespace Mng
             if (index == length) return false;
             index++;
             if (index >= length) return false;
-            bool hasDelay = data[offset + index++] != 0;
+            change = data[offset + index++];
             if (length - index < 3) return false;
             index += 3;
-            if (!hasDelay || length - index < 4) return false;
+            if (change == 0 || length - index < 4) return false;
             delay = ReadU32(data, offset + index);
             return true;
         }
