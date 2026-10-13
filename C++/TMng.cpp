@@ -2,8 +2,8 @@
 
 #include <algorithm>
 #include <array>
-#include <cmath>
 #include <cstring>
+#include <limits>
 
 namespace {
     constexpr std::array<std::uint8_t, 8> mngSignature{0x8a, 0x4d, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a};
@@ -13,16 +13,17 @@ namespace {
         return static_cast<std::uint32_t>(data[0]) << 24 | static_cast<std::uint32_t>(data[1]) << 16 | static_cast<std::uint32_t>(data[2]) << 8 | data[3];
     }
 
-    std::optional<std::uint32_t> frameDelay(const std::uint8_t* data, std::size_t length) {
-        if (length == 0) return std::nullopt;
+    int frameDelay(const std::uint8_t* data, std::size_t length, std::uint32_t& delay) {
+        if (length == 0) return 0;
         std::size_t offset = 1;
         while (offset < length && data[offset] != 0) offset++;
-        if (offset == length || ++offset >= length) return std::nullopt;
-        const bool hasDelay = data[offset++] != 0;
-        if (length - offset < 3) return std::nullopt;
+        if (offset == length || ++offset >= length) return 0;
+        const int change = data[offset++];
+        if (length - offset < 3) return 0;
         offset += 3;
-        if (!hasDelay || length - offset < 4) return std::nullopt;
-        return readBigEndian(data + offset);
+        if (change == 0 || length - offset < 4) return 0;
+        delay = readBigEndian(data + offset);
+        return change;
     }
 }
 
@@ -36,14 +37,15 @@ std::optional<TMng::Animation> TMng::parse(const void* content, std::size_t leng
     const auto* bytes = static_cast<const std::uint8_t*>(content);
     Animation animation;
     std::vector<std::uint8_t> frame;
-    std::optional<std::uint32_t> pendingDelay;
+    std::optional<std::uint32_t> defaultTicks;
+    std::optional<std::uint32_t> nextTicks;
     bool inPng = false;
     std::size_t offset = mngSignature.size();
     while (offset < length) {
         if (length - offset < 12) return std::nullopt;
         const std::uint32_t dataLength = readBigEndian(bytes + offset);
+        if (dataLength > length - offset - 12) return std::nullopt;
         const std::size_t chunkLength = static_cast<std::size_t>(dataLength) + 12;
-        if (chunkLength < 12 || chunkLength > length - offset) return std::nullopt;
         const char* type = reinterpret_cast<const char*>(bytes + offset + 4);
         const std::uint8_t* data = bytes + offset + 8;
         if (std::memcmp(type, "MHDR", 4) == 0) {
@@ -56,7 +58,15 @@ std::optional<TMng::Animation> TMng::parse(const void* content, std::size_t leng
             animation.nominalFrameCount = readBigEndian(data + 16);
             animation.nominalPlayTime = readBigEndian(data + 20);
             animation.simplicityProfile = readBigEndian(data + 24);
-        } else if (std::memcmp(type, "FRAM", 4) == 0) pendingDelay = frameDelay(data, dataLength);
+        } else if (std::memcmp(type, "FRAM", 4) == 0) {
+            std::uint32_t delayTicks = 0;
+            const int change = frameDelay(data, dataLength, delayTicks);
+            if (change == 1) nextTicks = delayTicks;
+            else if (change == 2) {
+                defaultTicks = delayTicks;
+                nextTicks.reset();
+            }
+        }
         if (!inPng && std::memcmp(type, "IHDR", 4) == 0) {
             frame.assign(pngSignature.begin(), pngSignature.end());
             inPng = true;
@@ -64,10 +74,15 @@ std::optional<TMng::Animation> TMng::parse(const void* content, std::size_t leng
         if (inPng) {
             frame.insert(frame.end(), bytes + offset, bytes + offset + chunkLength);
             if (std::memcmp(type, "IEND", 4) == 0) {
-                const double milliseconds = pendingDelay.has_value() ? std::round(static_cast<double>(*pendingDelay) * 1000.0 / animation.ticksPerSecond) : 100.0;
-                animation.frames.push_back({std::move(frame), static_cast<std::uint32_t>(std::max(0.0, milliseconds))});
+                const std::optional<std::uint32_t> ticks = nextTicks.has_value() ? nextTicks : defaultTicks;
+                std::uint32_t delay = 100;
+                if (ticks.has_value()) {
+                    const std::uint64_t milliseconds = (static_cast<std::uint64_t>(*ticks) * 1000 + animation.ticksPerSecond / 2) / animation.ticksPerSecond;
+                    delay = static_cast<std::uint32_t>(std::min<std::uint64_t>(milliseconds, std::numeric_limits<std::uint32_t>::max()));
+                }
+                animation.frames.push_back({std::move(frame), delay});
                 frame.clear();
-                pendingDelay.reset();
+                nextTicks.reset();
                 inPng = false;
             }
         }
