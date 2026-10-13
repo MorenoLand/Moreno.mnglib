@@ -28,7 +28,7 @@ h1 { color: #fff; margin-bottom: 16px; font-size: 18px; }
     <input type="file" id="file-input" multiple accept=".mng">
 </div>
 <div id="gallery"></div>
-<script src="mnglib.js"></script>
+<script src="mng.js"></script>
 <script>
 const drop = document.getElementById('drop');
 const gallery = document.getElementById('gallery');
@@ -41,18 +41,17 @@ document.getElementById('file-input').addEventListener('change', e => loadFiles(
 
 async function loadFiles(files) {
     for (const file of files) {
-        if (!file.name.endsWith('.mng')) continue;
-        const card = document.createElement('div');
-        card.className = 'card';
-        card.innerHTML = `<div class="name">${file.name}</div><div class="info">Loading…</div>`;
+        if (!file.name.toLowerCase().endsWith('.mng')) continue;
+        const card = document.createElement('div'), name = document.createElement('div'), info = document.createElement('div');
+        card.className = 'card'; name.className = 'name'; info.className = 'info';
+        name.textContent = file.name; info.textContent = 'Loading…';
+        card.append(name, info);
         gallery.appendChild(card);
         try {
             const buf = await file.arrayBuffer();
             const frames = await MNG.parse(buf);
             const canvas = await MNG.play(buf);
-            const info = card.querySelector('.info');
-            const delays = frames.map(f => f.delay);
-            const minD = Math.min(...delays), maxD = Math.max(...delays);
+            const minD = frames.reduce((m, f) => Math.min(m, f.delay), Infinity), maxD = frames.reduce((m, f) => Math.max(m, f.delay), 0);
             const delayStr = minD === maxD ? `${minD}ms/frame` : `${minD}–${maxD}ms/frame`;
             info.textContent = `${frames.length} frame${frames.length !== 1 ? 's' : ''} · ${canvas.width}×${canvas.height} · ${delayStr}`;
             card.appendChild(canvas);
@@ -66,7 +65,9 @@ async function loadFiles(files) {
                 card.appendChild(controls);
             }
         } catch(e) {
-            card.innerHTML += `<div class="err">${e.message}</div>`;
+            const err = document.createElement('div');
+            err.className = 'err'; err.textContent = e.message;
+            card.appendChild(err);
         }
     }
 }

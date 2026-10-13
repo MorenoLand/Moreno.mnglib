@@ -2,11 +2,10 @@
 // @name         MNG Support
 // @namespace    https://github.com/Denveous/mng.js
 // @version      1.0.0b
-// @description  Replaces img, object, embed, and CSS background-image *.mng references with animated canvas elements
+// @description  Replaces img, object, embed, and inline style background-image *.mng references with animated canvas elements
 // @author       Denveous
 // @match        *://*/*
 // @grant        GM_xmlhttpRequest
-// @connect      *
 // @license      0BSD
 // ==/UserScript==
 
@@ -18,9 +17,11 @@ function readChunks(buf) {
     const data = new Uint8Array(buf), view = new DataView(buf);
     for (let i = 0; i < 8; i++) if (data[i] !== MNG_SIG[i]) throw new Error('Not MNG');
     const chunks = []; let pos = 8;
-    while (pos < data.length - 12) {
+    while (pos < data.length) {
+        if (data.length - pos < 12) throw new Error('Truncated chunk');
         const len = view.getUint32(pos), type = String.fromCharCode(data[pos+4],data[pos+5],data[pos+6],data[pos+7]);
-        chunks.push({ type, len, data: data.slice(pos+8, pos+8+len), offset: pos });
+        if (len > data.length - pos - 12) throw new Error('Invalid chunk length');
+        chunks.push({ type, len, data: data.subarray(pos+8, pos+8+len), offset: pos });
         pos += len + 12;
     }
     return chunks;
@@ -30,31 +31,33 @@ function parseFRAM(d) {
     let pos = 1;
     while (pos < d.length && d[pos]) pos++;
     pos++;
-    if (pos >= d.length) return null;
-    const hasDelay = d[pos++]; pos += 3;
-    if (!hasDelay || pos + 4 > d.length) return null;
-    return new DataView(d.buffer, d.byteOffset + pos).getUint32(0);
+    if (pos + 4 > d.length) return null;
+    const mode = d[pos]; pos += 4;
+    if (!mode || pos + 4 > d.length) return null;
+    return { mode, ticks: new DataView(d.buffer, d.byteOffset + pos).getUint32(0) };
 }
 
 function parse(buf) {
     const raw = new Uint8Array(buf), chunks = readChunks(buf);
-    let ticksPerSec = 100, pendingDelay = null, frameParts = [], inPNG = false;
+    let ticksPerSec = 100, defaultTicks = null, nextTicks = null, frameParts = [], inPNG = false;
     const frames = [];
     for (const c of chunks) {
-        if (c.type === 'MHDR') { const t = new DataView(c.data.buffer, c.data.byteOffset).getUint32(8); if (t > 0) ticksPerSec = t; }
-        else if (c.type === 'FRAM') { const t = parseFRAM(c.data); if (t != null) pendingDelay = Math.round(t / ticksPerSec * 1000); }
-        else if (c.type === 'IHDR') { frameParts = [c]; inPNG = true; }
-        else if (inPNG) {
+        if (c.type === 'MHDR') { if (c.len < 28) throw new Error('Invalid MHDR'); const t = new DataView(c.data.buffer, c.data.byteOffset).getUint32(8); if (t > 0) ticksPerSec = t; }
+        else if (c.type === 'FRAM') { const f = parseFRAM(c.data); if (f?.mode === 1) nextTicks = f.ticks; else if (f?.mode === 2) { defaultTicks = f.ticks; nextTicks = null; } }
+        if (!inPNG && c.type === 'IHDR') { frameParts = []; inPNG = true; }
+        if (inPNG) {
             frameParts.push(c);
             if (c.type === 'IEND') {
                 inPNG = false;
                 const png = new Uint8Array(8 + frameParts.reduce((s,x) => s + x.len + 12, 0));
                 png.set(PNG_SIG); let p = 8;
-                for (const f of frameParts) { png.set(raw.slice(f.offset, f.offset + f.len + 12), p); p += f.len + 12; }
-                frames.push({ png, delay: pendingDelay || 100 }); pendingDelay = null;
+                for (const f of frameParts) { png.set(raw.subarray(f.offset, f.offset + f.len + 12), p); p += f.len + 12; }
+                const ticks = nextTicks ?? defaultTicks, n = ticks * 1000 + (ticksPerSec >>> 1);
+                frames.push({ png, delay: ticks === null ? 100 : Math.min(4294967295, (n - n % ticksPerSec) / ticksPerSec) }); nextTicks = null;
             }
         }
     }
+    if (inPNG || !frames.length) throw new Error('No complete frames');
     return frames;
 }
 
@@ -62,7 +65,8 @@ function loadImages(frames) {
     return Promise.all(frames.map(f => new Promise((res, rej) => {
         const img = new Image(), url = URL.createObjectURL(new Blob([f.png], { type: 'image/png' }));
         img.onload = () => { URL.revokeObjectURL(url); res({ img, delay: f.delay }); };
-        img.onerror = rej; img.src = url;
+        img.onerror = () => { URL.revokeObjectURL(url); rej(new Error('Frame decode failed')); };
+        img.src = url;
     })));
 }
 
@@ -72,17 +76,25 @@ function makeCanvas(frames) {
     const ctx = canvas.getContext('2d');
     let idx = 0, timer = null, running = false;
     const draw = () => { ctx.clearRect(0, 0, canvas.width, canvas.height); ctx.drawImage(frames[idx].img, 0, 0); };
-    const tick = () => { draw(); timer = setTimeout(() => { idx = (idx + 1) % frames.length; tick(); }, frames[idx].delay); };
+    const tick = () => { draw(); timer = setTimeout(() => { if (!canvas.isConnected) { running = false; return; } idx = (idx + 1) % frames.length; tick(); }, Math.min(frames[idx].delay, 2147483647)); };
     canvas.play  = () => { if (!running) { running = true; tick(); } };
     canvas.pause = () => { clearTimeout(timer); running = false; };
     canvas.stop  = () => { canvas.pause(); idx = 0; draw(); };
     draw(); return canvas;
 }
 
+function mngUrl(u) {
+    try {
+        const url = new URL(u, document.baseURI);
+        return /^https?:$/.test(url.protocol) && /\.mng$/i.test(url.pathname) ? url.href : null;
+    } catch(e) { return null; }
+}
+
 function gmFetch(url) {
     return new Promise((res, rej) => GM_xmlhttpRequest({
-        method: 'GET', url, responseType: 'arraybuffer',
-        onload: r => res(r.response), onerror: rej
+        method: 'GET', url, responseType: 'arraybuffer', timeout: 15000,
+        onload: r => res(r.response), onerror: () => rej(new Error('Request failed')),
+        onabort: () => rej(new Error('Request aborted')), ontimeout: () => rej(new Error('Request timed out'))
     }));
 }
 function fetchBuf(url) {
@@ -107,7 +119,7 @@ async function processEl(el, url) {
 
 async function processBg(el) {
     if (el.dataset.mngBgProcessed) return;
-    const url = el.style.backgroundImage.match(/url\(["']?([^"')]+\.mng)["']?\)/)?.[1];
+    const url = [...el.style.backgroundImage.matchAll(/url\(["']?([^"')]+)["']?\)/g)].map(m => mngUrl(m[1])).find(Boolean);
     if (!url) return;
     el.dataset.mngBgProcessed = '1';
     try {
@@ -116,25 +128,33 @@ async function processBg(el) {
         const canvas = makeCanvas(frames);
         const cs = getComputedStyle(el);
         canvas.style.width = cs.width; canvas.style.height = cs.height;
-        canvas.style.position = 'absolute'; canvas.style.top = '0'; canvas.style.left = '0';
-        el.style.position = el.style.position || 'relative';
+        canvas.style.position = 'absolute'; canvas.style.top = '0'; canvas.style.left = '0'; canvas.style.zIndex = '-1';
+        if (cs.position === 'static') el.style.position = 'relative';
+        el.style.isolation = 'isolate';
         el.style.backgroundImage = 'none';
         el.prepend(canvas);
         if (frames.length > 1) canvas.play();
     } catch(e) { console.warn('[MNG bg]', url, e.message); }
 }
 
+function check(el) {
+    const tag = el.localName;
+    if (tag === 'img' || tag === 'embed' || tag === 'object') {
+        const url = mngUrl(tag === 'object' ? el.data : el.src);
+        if (url) processEl(el, url);
+    } else if (el.style?.backgroundImage) processBg(el);
+}
+
 function scan(root) {
-    if (!root.querySelectorAll) return;
-    root.querySelectorAll('img[src$=".mng"]').forEach(el => processEl(el, el.src));
-    root.querySelectorAll('object[data$=".mng"], embed[src$=".mng"]').forEach(el => processEl(el, el.data || el.src));
-    root.querySelectorAll('*').forEach(el => { if (el.style.backgroundImage?.includes('.mng')) processBg(el); });
+    if (root.nodeType === 1) check(root);
+    root.querySelectorAll('*').forEach(check);
 }
 
 scan(document);
 new MutationObserver(mutations => {
-    for (const m of mutations)
-        for (const n of m.addedNodes)
-            if (n.nodeType === 1) scan(n);
-}).observe(document.body, { childList: true, subtree: true });
+    for (const m of mutations) {
+        if (m.type === 'attributes') check(m.target);
+        else for (const n of m.addedNodes) if (n.nodeType === 1) scan(n);
+    }
+}).observe(document.body || document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ['src', 'data', 'style'] });
 })();

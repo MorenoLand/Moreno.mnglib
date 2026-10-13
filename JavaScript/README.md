@@ -13,6 +13,9 @@ document.body.appendChild(canvas);
 canvas.play();
 canvas.pause();
 canvas.stop();
+
+const frames = await MNG.parse(file); // [{ png, delay }]
+const blob = await MNG.toBlob(file);  // first frame as image/png
 ```
 
 ## API
@@ -21,11 +24,13 @@ canvas.stop();
 
 | Method | Description |
 |---|---|
-| `MNG.play(src, autoplay?)` | Parses, loads, and returns an animated `<canvas>`. Autoplays by default. |
-| `MNG.parse(src)` | Returns raw frame data `{ png: Uint8Array, delay: number }[]` |
-| `MNG.toBlob(src)` | Returns the first frame as a PNG `Blob` |
+| `MNG.play(src, autoplay?)` | Returns a `Promise` of an animated `<canvas>`. Autoplays by default. |
+| `MNG.parse(src)` | Returns a `Promise` of `{ png: Uint8Array, delay: number }[]`, with `delay` in milliseconds. |
+| `MNG.toBlob(src)` | Returns a `Promise` of the first frame as a PNG `Blob`. |
 
 `src` accepts a `File` or `ArrayBuffer`.
+
+All three methods reject with an `Error` for a malformed file: bad signature, truncated or out-of-bounds chunk, MHDR shorter than 28 bytes, a PNG run without IEND, no frames, or trailing bytes. `play` also rejects if a frame fails to decode.
 
 ### Canvas (returned by `MNG.play`)
 
@@ -35,13 +40,15 @@ canvas.stop();
 | `canvas.pause()` | Pause at current frame |
 | `canvas.stop()` | Stop and reset to first frame |
 
+The animation loop stops at a frame change if the canvas is not in the document. Attach the canvas right after `MNG.play` resolves, and call `canvas.play()` again after re-attaching it.
+
 ## Features
 
 - Parses MNG chunk structure (MHDR, FRAM, IHDR→IEND)
-- Correct per-frame delay timing via FRAM chunk
+- Per-frame delay from FRAM chunks (delay mode 1 applies to the next frame, mode 2 also becomes the default), in whole milliseconds rounded half up and capped at 4294967295; a frame with no delay uses 100 ms
 - Falls back to 100 ticks/sec if MHDR omits tick rate (MNG spec default)
 - Descriptive error on invalid signature showing actual file bytes
-- Zero dependencies, ~80 lines
+- Zero dependencies
 
 ## Links
 
