@@ -1,14 +1,11 @@
-package engine
+package tmng
 
 import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
-	"image/png"
-	"strings"
+	"math"
 	"time"
-
-	"github.com/hajimehoshi/ebiten/v2"
 )
 
 var tMNGSignature = [...]byte{0x8a, 0x4d, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a}
@@ -30,18 +27,13 @@ type TMNGAnimation struct {
 	Frames            []TMNGFrame
 }
 
-type tAdventureMNGAnimation struct {
-	animation *TMNGAnimation
-	images    []*ebiten.Image
-}
-
 func IsMNG(data []byte) bool {
 	return len(data) >= len(tMNGSignature) && bytes.Equal(data[:len(tMNGSignature)], tMNGSignature[:])
 }
 
-func tMNGFrameDelay(data []byte) (uint32, bool) {
+func tMNGFrameDelay(data []byte) (byte, uint32) {
 	if len(data) == 0 {
-		return 0, false
+		return 0, 0
 	}
 	offset := 1
 	for offset < len(data) && data[offset] != 0 {
@@ -49,14 +41,14 @@ func tMNGFrameDelay(data []byte) (uint32, bool) {
 	}
 	offset++
 	if offset >= len(data) {
-		return 0, false
+		return 0, 0
 	}
-	hasDelay := data[offset] != 0
+	change := data[offset]
 	offset += 4
-	if !hasDelay || offset+4 > len(data) {
-		return 0, false
+	if change == 0 || len(data)-offset < 4 {
+		return 0, 0
 	}
-	return binary.BigEndian.Uint32(data[offset : offset+4]), true
+	return change, binary.BigEndian.Uint32(data[offset : offset+4])
 }
 
 func ParseMNG(data []byte) (*TMNGAnimation, error) {
@@ -65,20 +57,20 @@ func ParseMNG(data []byte) (*TMNGAnimation, error) {
 	}
 	animation := &TMNGAnimation{TicksPerSecond: 100}
 	var frame []byte
-	var pendingDelay uint32
-	hasPendingDelay := false
+	var defaultTicks, nextTicks uint32
+	hasDefaultTicks, hasNextTicks := false, false
 	inPNG := false
 	for offset := len(tMNGSignature); offset < len(data); {
 		if len(data)-offset < 12 {
 			return nil, fmt.Errorf("truncated MNG chunk")
 		}
-		dataLength := int(binary.BigEndian.Uint32(data[offset : offset+4]))
-		chunkLength := dataLength + 12
-		if chunkLength < 12 || chunkLength > len(data)-offset {
+		dataLength := binary.BigEndian.Uint32(data[offset : offset+4])
+		if uint64(dataLength) > uint64(len(data)-offset-12) {
 			return nil, fmt.Errorf("invalid MNG chunk length")
 		}
+		chunkLength := int(dataLength) + 12
 		chunkType := string(data[offset+4 : offset+8])
-		chunkData := data[offset+8 : offset+8+dataLength]
+		chunkData := data[offset+8 : offset+8+int(dataLength)]
 		switch chunkType {
 		case "MHDR":
 			if len(chunkData) < 28 {
@@ -94,7 +86,12 @@ func ParseMNG(data []byte) (*TMNGAnimation, error) {
 			animation.NominalPlayTime = binary.BigEndian.Uint32(chunkData[20:24])
 			animation.SimplicityProfile = binary.BigEndian.Uint32(chunkData[24:28])
 		case "FRAM":
-			pendingDelay, hasPendingDelay = tMNGFrameDelay(chunkData)
+			switch change, ticks := tMNGFrameDelay(chunkData); change {
+			case 1:
+				nextTicks, hasNextTicks = ticks, true
+			case 2:
+				defaultTicks, hasDefaultTicks, hasNextTicks = ticks, true, false
+			}
 		}
 		if !inPNG && chunkType == "IHDR" {
 			frame = append(frame[:0], tPNGSignature[:]...)
@@ -104,15 +101,20 @@ func ParseMNG(data []byte) (*TMNGAnimation, error) {
 			frame = append(frame, data[offset:offset+chunkLength]...)
 			if chunkType == "IEND" {
 				delay := 100 * time.Millisecond
-				if hasPendingDelay {
-					milliseconds := (uint64(pendingDelay)*1000 + uint64(animation.TicksPerSecond)/2) / uint64(animation.TicksPerSecond)
-					if milliseconds > 0 {
-						delay = time.Duration(milliseconds) * time.Millisecond
+				if hasNextTicks || hasDefaultTicks {
+					ticks := defaultTicks
+					if hasNextTicks {
+						ticks = nextTicks
 					}
+					milliseconds := (uint64(ticks)*1000 + uint64(animation.TicksPerSecond)/2) / uint64(animation.TicksPerSecond)
+					if milliseconds > math.MaxUint32 {
+						milliseconds = math.MaxUint32
+					}
+					delay = time.Duration(milliseconds) * time.Millisecond
 				}
 				animation.Frames = append(animation.Frames, TMNGFrame{PNG: append([]byte(nil), frame...), Delay: delay})
 				frame = frame[:0]
-				hasPendingDelay = false
+				hasNextTicks = false
 				inPNG = false
 			}
 		}
@@ -133,6 +135,10 @@ func (animation *TMNGAnimation) FrameIndexAt(elapsed time.Duration) int {
 	}
 	var duration time.Duration
 	for _, frame := range animation.Frames {
+		if frame.Delay > math.MaxInt64-duration {
+			duration = math.MaxInt64
+			break
+		}
 		duration += frame.Delay
 	}
 	if duration <= 0 {
@@ -157,44 +163,4 @@ func FirstMNGPNGFrame(data []byte) ([]byte, error) {
 		return nil, err
 	}
 	return append([]byte(nil), animation.Frames[0].PNG...), nil
-}
-
-func (adventure *TAdventure) loadAdventureMNGFrame(name string, elapsed time.Duration) *ebiten.Image {
-	if adventure == nil || adventure.files == nil {
-		return nil
-	}
-	name = strings.TrimSpace(strings.ReplaceAll(name, "\\", "/"))
-	key := strings.ToLower(name)
-	animation := adventure.mngCache[key]
-	if animation == nil && !adventure.mngFailures[key] {
-		data, _, err := adventure.files.ReadDataFile(name)
-		if err != nil {
-			return nil
-		}
-		parsed, err := ParseMNG(data)
-		if err == nil {
-			animation = &tAdventureMNGAnimation{animation: parsed, images: make([]*ebiten.Image, len(parsed.Frames))}
-			for index, frame := range parsed.Frames {
-				image, decodeErr := png.Decode(bytes.NewReader(frame.PNG))
-				if decodeErr != nil {
-					err = decodeErr
-					break
-				}
-				animation.images[index] = ebiten.NewImageFromImage(image)
-			}
-		}
-		if err != nil {
-			adventure.mngFailures[key] = true
-			return nil
-		}
-		adventure.mngCache[key] = animation
-	}
-	if animation == nil {
-		return nil
-	}
-	index := animation.animation.FrameIndexAt(elapsed)
-	if index < 0 || index >= len(animation.images) {
-		return nil
-	}
-	return animation.images[index]
 }
